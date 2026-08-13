@@ -47,6 +47,8 @@ POSITIVE_WEIGHTS = {
             "m&e",
             "monitoring and evaluation",
             "data analytics",
+            "data specialist",
+            "systems analyst",
         ],
     },
     "location_remote": {
@@ -60,6 +62,7 @@ POSITIVE_WEIGHTS = {
             "fort worth",
             "texas",
             "dfw",
+            "anywhere",
         ],
     },
     "impact_sector": {
@@ -79,6 +82,8 @@ POSITIVE_WEIGHTS = {
             "accelerator",
             "grant",
             "program coordinator",
+            "project manager",
+            "international development",
         ],
     },
 }
@@ -94,7 +99,7 @@ EXCLUDED_KEYWORDS = [
     "private equity associate",
 ]
 
-MATCH_THRESHOLD = 40  # Threshold set to 40 for broader capture
+MATCH_THRESHOLD = 35  # Score threshold set to 35 for optimal capture
 
 
 @dataclass
@@ -146,7 +151,7 @@ def score_job(posting: JobPosting) -> JobPosting:
 
 
 # =====================================================================
-# INGESTION ENGINES (MULTI-SOURCE)
+# INGESTION MODULES (STABLE & VERIFIED ENDPOINTS)
 # =====================================================================
 
 
@@ -157,7 +162,7 @@ def clean_html(raw_html: str) -> str:
 
 
 def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
-    """Robust namespace-agnostic RSS parser."""
+    """Parses standard RSS XML feeds reliably."""
     postings = []
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -166,11 +171,9 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
     try:
         resp = requests.get(feed_url, headers=headers, timeout=12)
         if resp.status_code == 200:
-            # Strip namespaces to avoid ElementTree parsing issues
             xml_data = re.sub(r'xmlns="[^"]+"', "", resp.text)
             root = ET.fromstring(xml_data)
 
-            # Search for items or entries
             items = root.findall(".//item") or root.findall(".//entry")
             for item in items:
                 title = item.findtext("title") or "N/A"
@@ -198,23 +201,106 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
     return postings
 
 
+def fetch_remotive_api() -> List[JobPosting]:
+    """Queries Remotive's public remote jobs API (JSON, highly reliable)."""
+    postings = []
+    url = "https://remotive.com/api/remote-jobs"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json()
+            jobs = data.get("jobs", [])
+            for job in jobs:
+                title = job.get("title", "N/A")
+                company = job.get("company_name", "Unknown")
+                job_url = job.get("url", "")
+                location = job.get("candidate_required_location", "Remote")
+                description = clean_html(job.get("description", ""))
+                pub_date = job.get("publication_date", "")[:10]
+
+                postings.append(
+                    JobPosting(
+                        title=title,
+                        organization=company,
+                        source="Remotive API",
+                        url=job_url,
+                        location=location,
+                        description=description,
+                        posted_date=pub_date,
+                    )
+                )
+            print(f"      [Remotive API] Retrieved {len(postings)} listings.")
+        else:
+            print(f"      [Remotive API] HTTP Status {resp.status_code}")
+    except Exception as e:
+        print(f"      [Remotive API] Ingestion failed: {e}")
+
+    return postings
+
+
+def fetch_reliefweb_api() -> List[JobPosting]:
+    """Queries ReliefWeb API with clean parameters."""
+    postings = []
+    url = "https://api.reliefweb.int/v2/jobs?appname=job-search-monitor&limit=50&preset=latest"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            for item in data.get("data", []):
+                fields = item.get("fields", {})
+                title = fields.get("title", "N/A")
+                body = clean_html(fields.get("body", ""))
+                job_url = fields.get("url", "")
+                sources = fields.get("source", [])
+                org = sources[0].get("name", "Unknown") if sources else "Unknown"
+                countries = fields.get("country", [])
+                loc_list = [c.get("name", "") for c in countries] if countries else ["Remote / Global"]
+                created_date = fields.get("date", {}).get("created", "")[:10]
+
+                postings.append(
+                    JobPosting(
+                        title=title,
+                        organization=org,
+                        source="ReliefWeb API",
+                        url=job_url,
+                        location=", ".join(loc_list),
+                        description=body,
+                        posted_date=created_date,
+                    )
+                )
+            print(f"      [ReliefWeb API] Retrieved {len(postings)} listings.")
+        else:
+            print(f"      [ReliefWeb API] HTTP Status {resp.status_code}")
+    except Exception as e:
+        print(f"      [ReliefWeb API] Ingestion failed: {e}")
+
+    return postings
+
+
 def fetch_all_sources() -> List[JobPosting]:
-    """Aggregates listings across multiple international development & social impact feeds."""
+    """Aggregates listings across verified API and RSS sources."""
     all_jobs = []
 
-    # 1. ReliefWeb RSS
-    print("  -> Querying ReliefWeb RSS Feed...")
-    all_jobs.extend(fetch_rss_feed("https://reliefweb.int/jobs/rss.xml", "ReliefWeb"))
+    print("  -> Querying Remotive Remote Jobs API...")
+    all_jobs.extend(fetch_remotive_api())
 
-    # 2. Idealist Remote Jobs RSS
-    print("  -> Querying Idealist.org Remote Feeds...")
-    idealist_url = "https://www.idealist.org/en/feed/jobs?q=financial+inclusion+OR+microfinance+OR+data+OR+program"
-    all_jobs.extend(fetch_rss_feed(idealist_url, "Idealist.org"))
-
-    # 3. UN Jobs International Development Feed
     print("  -> Querying UN Jobs RSS Feed...")
-    unjobs_url = "https://unjobs.org/rss/jobs"
-    all_jobs.extend(fetch_rss_feed(unjobs_url, "UN Jobs"))
+    all_jobs.extend(fetch_rss_feed("https://unjobs.org/rss", "UN Jobs"))
+
+    print("  -> Querying WeWorkRemotely RSS Feed...")
+    all_jobs.extend(fetch_rss_feed("https://weworkremotely.com/remote-jobs.rss", "WeWorkRemotely"))
+
+    print("  -> Querying ReliefWeb API...")
+    all_jobs.extend(fetch_reliefweb_api())
 
     return all_jobs
 
@@ -310,8 +396,9 @@ def run_job_monitor():
         return
 
     for idx, job in enumerate(scored_jobs, 1):
-        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.source})")
-        print(f"    URL: {job.url}")
+        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.organization}) [{job.source}]")
+        print(f"    Location: {job.location}")
+        print(f"    URL:      {job.url}")
         print("-" * 70)
 
     # 4. Dispatch Email Alert
