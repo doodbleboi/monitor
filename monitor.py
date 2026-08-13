@@ -285,3 +285,5 @@ def run_job_monitor():
     print(f"      Retrieved {len(raw_postings)} active listings.")
 
     # 2. Score Listings
+if __name__ == "__main__":
+    run_job_monitor()
