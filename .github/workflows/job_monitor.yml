@@ -19,6 +19,7 @@ jobs:
 
       - name: Execute Job Search Script
         env:
+          PYTHONUNBUFFERED: "1"  # Forces live console log streaming
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
