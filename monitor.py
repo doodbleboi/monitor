@@ -1,15 +1,13 @@
 import json
 import os
-import re
 import smtplib
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # =====================================================================
 # CANDIDATE MATCH VECTOR CONFIGURATION
@@ -152,28 +150,22 @@ def score_job(posting: JobPosting) -> JobPosting:
 
 
 def fetch_reliefweb_jobs(limit: int = 50) -> List[JobPosting]:
-    """Fetches real-time listings from ReliefWeb API using GET request to bypass POST WAF blocks."""
+    """Fetches real-time listings from ReliefWeb API using percent-encoded query parameters."""
     query_terms = "financial inclusion OR microfinance OR data OR automation OR program coordinator"
-    encoded_query = urllib.parse.quote(query_terms)
-
-    url = (
-        f"https://api.reliefweb.int/v2/jobs?"
-        f"appname=dresetar-job-monitor&"
-        f"limit={limit}&"
-        f"preset=latest&"
-        f"fields[include][]=title&"
-        f"fields[include][]=body&"
-        f"fields[include][]=source&"
-        f"fields[include][]=url&"
-        f"fields[include][]=country&"
-        f"fields[include][]=date&"
-        f"query[value]={encoded_query}"
-    )
+    
+    # Properly encode parameters (turns [ ] into %5B %5D to pass Cloudflare WAF)
+    params = {
+        "appname": "dresetar-job-monitor",
+        "limit": str(limit),
+        "preset": "latest",
+        "query[value]": query_terms
+    }
+    
+    url = f"https://api.reliefweb.int/v2/jobs?{urllib.parse.urlencode(params)}"
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json",
     }
 
     req = urllib.request.Request(url, headers=headers)
