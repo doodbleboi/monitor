@@ -21,4 +21,4 @@ jobs:
         run: pip install requests
 
       - name: Execute Job Search Script
-        run: python monitor_jobs.py
+        run: python monitor.py
