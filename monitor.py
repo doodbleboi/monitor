@@ -13,47 +13,56 @@ import requests
 # CANDIDATE MATCH VECTOR CONFIGURATION
 # =====================================================================
 
-# Primary Domain Anchors - Essential non-profit, public sector, & program domains
 DOMAIN_ANCHORS = [
     "program coordinator", "program manager", "project manager", "project coordinator",
-    "small business", "business development", "grant coordinator", "grant administrator",
-    "community development", "financial inclusion", "microfinance", "vsla", "silc",
-    "village savings", "rural finance", "ngo", "nonprofit", "non-profit", "usaid",
-    "public sector", "city of fort worth", "tarrant county", "city of dallas",
+    "program associate", "project associate", "operations associate", "small business",
+    "grant coordinator", "grant administrator", "community development", "financial inclusion",
+    "microfinance", "vsla", "silc", "rural finance", "ngo", "nonprofit", "non-profit",
+    "usaid", "public sector", "city of fort worth", "tarrant county", "city of dallas",
     "city of irving", "city of grapevine", "usajobs", "sba", "hud", "m&e",
-    "monitoring and evaluation", "economic development", "social impact", "pslf"
+    "monitoring and evaluation", "economic development", "social impact", "pslf",
+    "refugee", "resettlement", "caseworker", "economic empowerment"
 ]
 
 POSITIVE_WEIGHTS = {
-    "local_transit_corridor": {
+    # NEW VECTOR: On-The-Job Training & Skill Building Focus
+    "training_and_associate_pipelines": {
+        "score": 35,
+        "keywords": [
+            "program associate", "project associate", "operations associate",
+            "entry level", "training provided", "on-the-job training", "paid training",
+            "comprehensive onboarding", "fellowship", "trainee", "associate program",
+            "no experience required", "will train", "pathways", "caseworker",
+            "resettlement specialist", "community engagement"
+        ],
+    },
+    "local_ngo_and_transit_corridor": {
         "score": 30,
         "keywords": [
             "fort worth", "grapevine", "irving", "dallas", "tarrant county",
-            "dfw", "texas", "tx", "downtown fort worth"
+            "dfw", "texas", "tx", "world relief", "international rescue committee",
+            "irc", "catholic charities", "united way", "center for transforming lives"
         ],
     },
     "target_role_titles": {
-        "score": 35,
+        "score": 25,
         "keywords": [
             "program manager", "project manager", "program coordinator",
-            "project coordinator", "program associate", "operations associate",
-            "small business specialist", "business development specialist",
-            "grant manager", "grant coordinator", "m&e specialist",
-            "community outreach coordinator", "compliance specialist"
+            "project coordinator", "small business specialist", "business development specialist",
+            "grant manager", "grant coordinator", "m&e specialist", "compliance specialist"
         ],
     },
     "impact_and_public_sector": {
-        "score": 30,
+        "score": 25,
         "keywords": [
             "ngo", "nonprofit", "non-profit", "public sector", "government",
-            "usaid", "sba", "small business administration", "hud", "chemonics",
-            "mercy corps", "kiva", "brac", "catholic relief services", "giz",
-            "financial inclusion", "microfinance", "economic development",
-            "community development", "pslf"
+            "usaid", "sba", "hud", "chemonics", "dai", "mercy corps", "kiva",
+            "brac", "catholic relief services", "giz", "financial inclusion",
+            "microfinance", "economic development", "community development", "pslf"
         ],
     },
     "operations_tech_enabled": {
-        "score": 20,
+        "score": 15,
         "keywords": [
             "excel", "spreadsheet", "data entry", "budget tracking",
             "invoice audit", "reconciliation", "reporting", "dashboard",
@@ -61,33 +70,27 @@ POSITIVE_WEIGHTS = {
             "ai tools", "google apps script", "python", "stata"
         ],
     },
-    "location_remote": {
-        "score": 15,
-        "keywords": [
-            "remote", "work from home", "telecommute", "us remote", "anywhere"
-        ],
-    },
 }
 
 EXCLUDED_KEYWORDS = [
-    # 1. Hard Exclusion: Construction & Civil Engineering
+    # Construction & Civil Engineering
     "construction", "civil engineer", "general contractor", "heavy equipment",
     "superintendent", "building inspector", "estimator", "hvac", "plumbing",
     "carpentry", "site supervisor", "safety officer - construction", "subcontractor",
     
-    # 2. Hard Exclusion: Software Engineering & Senior Dev
+    # Senior Software Engineering
     "software engineer", "software developer", "full stack", "full-stack",
     "backend engineer", "frontend engineer", "devops", "software architect",
     "machine learning", "react developer", "rails engineer", "data engineer",
     "qa engineer", "solutions architect", "web developer", ".net developer",
     
-    # 3. Hard Exclusion: Commercial Sales & Wall St Banking
+    # Commercial Corporate Sales
     "commercial bank", "investment banking", "wall street", "wealth management",
     "retail banking", "corporate finance", "mortgage broker", "private equity",
     "mortgage processor", "inside sales", "account executive dach", "brand designer"
 ]
 
-MATCH_THRESHOLD = 40  # Clean score threshold for targeted opportunities
+MATCH_THRESHOLD = 35  # Threshold set to capture all viable associate & training positions
 
 
 @dataclass
@@ -101,6 +104,7 @@ class JobPosting:
     posted_date: str
     match_score: int = 0
     matched_reasons: List[str] = field(default_factory=list)
+    is_training_role: bool = False
 
 
 # =====================================================================
@@ -128,7 +132,12 @@ def score_job(posting: JobPosting) -> JobPosting:
         total_score -= 30
         reasons.append("PENALTY (-30pt): Lacks explicit Program/Public/Non-Profit domain anchor")
 
-    # 3. Positive Keyword Scoring
+    # 3. Check if it explicitly fits On-The-Job Training / Associate keywords
+    training_terms = POSITIVE_WEIGHTS["training_and_associate_pipelines"]["keywords"]
+    if any(term in text_corpus for term in training_terms):
+        posting.is_training_role = True
+
+    # 4. Positive Keyword Scoring
     for category, config in POSITIVE_WEIGHTS.items():
         found = [kw for kw in config["keywords"] if kw in text_corpus]
         if found:
@@ -193,10 +202,9 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
 
 
 def fetch_usajobs_feed() -> List[JobPosting]:
-    """Queries USAJOBS public Search API for non-construction Program/Project/Small Business roles in DFW & Remote."""
+    """Queries USAJOBS public API for Program, Associate, and Small Business roles in DFW & Remote."""
     postings = []
-    # Search keywords tailored for public administration, small business, and program management
-    keywords = ["Program Manager", "Project Manager", "Small Business", "Grant Specialist"]
+    keywords = ["Program Associate", "Project Coordinator", "Small Business", "Grant Specialist", "Pathways"]
     
     headers = {
         "User-Agent": "dresetar@gmail.com",
@@ -281,7 +289,7 @@ def fetch_remotive_api() -> List[JobPosting]:
 
 
 def fetch_reliefweb_api() -> List[JobPosting]:
-    """Queries ReliefWeb API with clean parameters."""
+    """Queries ReliefWeb API for NGO and humanitarian roles."""
     postings = []
     url = "https://api.reliefweb.int/v2/jobs?appname=job-search-monitor&limit=50&preset=latest"
     headers = {
@@ -349,7 +357,7 @@ def fetch_all_sources() -> List[JobPosting]:
 
 
 def send_email_alert(matched_jobs: List[JobPosting]):
-    """Sends an email alert via Gmail SMTP using environment variables."""
+    """Sends a structured email alert via Gmail SMTP."""
     sender_email = os.environ.get("SENDER_EMAIL", "dresetar@gmail.com")
     sender_password = os.environ.get("SENDER_PASSWORD")
     recipient_email = os.environ.get("RECIPIENT_EMAIL", "raveonette85@gmail.com")
@@ -360,27 +368,47 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
     print(f"\n[EMAIL] Dispatching alert to {recipient_email} for {len(matched_jobs)} match(es)...")
 
+    # Separate training/associate roles from standard program roles in email body
+    training_jobs = [j for j in matched_jobs if j.is_training_role]
+    standard_jobs = [j for j in matched_jobs if not j.is_training_role]
+
     body_lines = [
         f"Automated Job Search Monitor identified {len(matched_jobs)} targeted opportunity(ies):\n",
         "=" * 70,
         "",
     ]
 
-    for idx, job in enumerate(matched_jobs, 1):
-        body_lines.append(f"[{idx}] {job.title} — {job.organization}")
-        body_lines.append(f"    Source:      {job.source}")
-        body_lines.append(f"    Location:    {job.location}")
-        body_lines.append(f"    Match Score: {job.match_score}/100")
-        body_lines.append(f"    URL:         {job.url}")
-        body_lines.append("    Match Factors:")
-        for reason in job.matched_reasons:
-            body_lines.append(f"      - {reason}")
-        body_lines.append("-" * 70)
+    if training_jobs:
+        body_lines.append(f"🎓 ON-THE-JOB TRAINING / ASSOCIATE POSITIONS ({len(training_jobs)}):\n")
+        for idx, job in enumerate(training_jobs, 1):
+            body_lines.append(f"[{idx}] {job.title} — {job.organization}")
+            body_lines.append(f"    Source:      {job.source}")
+            body_lines.append(f"    Location:    {job.location}")
+            body_lines.append(f"    Match Score: {job.match_score}/100")
+            body_lines.append(f"    URL:         {job.url}")
+            body_lines.append("    Match Factors:")
+            for reason in job.matched_reasons:
+                body_lines.append(f"      - {reason}")
+            body_lines.append("-" * 70)
+        body_lines.append("\n")
+
+    if standard_jobs:
+        body_lines.append(f"📋 PROGRAM & OPERATIONS POSITIONS ({len(standard_jobs)}):\n")
+        for idx, job in enumerate(standard_jobs, 1):
+            body_lines.append(f"[{idx}] {job.title} — {job.organization}")
+            body_lines.append(f"    Source:      {job.source}")
+            body_lines.append(f"    Location:    {job.location}")
+            body_lines.append(f"    Match Score: {job.match_score}/100")
+            body_lines.append(f"    URL:         {job.url}")
+            body_lines.append("    Match Factors:")
+            for reason in job.matched_reasons:
+                body_lines.append(f"      - {reason}")
+            body_lines.append("-" * 70)
 
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = recipient_email
-    msg["Subject"] = f"🚨 Target Job Alert: {len(matched_jobs)} DFW & Remote Position(s) Found"
+    msg["Subject"] = f"🚨 Target Job Alert: {len(matched_jobs)} Roles Found ({len(training_jobs)} Training/Associate)"
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     try:
@@ -399,7 +427,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
 def run_job_monitor():
     print("=" * 70)
-    print(f"RUNNING TARGETED JOB MONITOR (DFW / FEDERAL / REMOTE) — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RUNNING TARGETED JOB MONITOR (DFW / NGO / TRAINING Focus) — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
     # 1. Fetch Listings
@@ -434,7 +462,8 @@ def run_job_monitor():
         return
 
     for idx, job in enumerate(scored_jobs, 1):
-        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.organization}) [{job.source}]")
+        tag = "[TRAINING/ASSOCIATE]" if job.is_training_role else "[PROGRAM/OPS]"
+        print(f"[{idx}] {tag} SCORE: {job.match_score}/100 | {job.title} ({job.organization}) [{job.source}]")
         print(f"    Location: {job.location}")
         print(f"    URL:      {job.url}")
         print("-" * 70)
