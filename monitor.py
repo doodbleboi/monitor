@@ -13,63 +13,81 @@ import requests
 # CANDIDATE MATCH VECTOR CONFIGURATION
 # =====================================================================
 
-# Primary Domain Anchors - At least one required to avoid commercial penalty
+# Primary Domain Anchors - Essential non-profit, public sector, & program domains
 DOMAIN_ANCHORS = [
-    "financial inclusion", "microfinance", "vsla", "silc", "village savings",
-    "community loan", "credit scoring", "underwriting", "capital deployment",
-    "microloan", "rural finance", "ngo", "nonprofit", "non-profit", "usaid",
-    "chemonics", "dai", "mercy corps", "kiva", "brac", "catholic relief services",
-    "giz", "accelerator", "grant", "m&e", "monitoring and evaluation",
-    "international development", "economic empowerment", "social impact",
-    "public sector", "un jobs", "undp", "world bank", "humanitarian",
-    "civil society", "cooperative"
+    "program coordinator", "program manager", "project manager", "project coordinator",
+    "small business", "business development", "grant coordinator", "grant administrator",
+    "community development", "financial inclusion", "microfinance", "vsla", "silc",
+    "village savings", "rural finance", "ngo", "nonprofit", "non-profit", "usaid",
+    "public sector", "city of fort worth", "tarrant county", "city of dallas",
+    "city of irving", "city of grapevine", "usajobs", "sba", "hud", "m&e",
+    "monitoring and evaluation", "economic development", "social impact", "pslf"
 ]
 
 POSITIVE_WEIGHTS = {
-    "domain_microfinance": {
-        "score": 35,
-        "keywords": [
-            "financial inclusion", "microfinance", "vsla", "silc", "village savings",
-            "community loans", "credit scoring", "underwriting", "capital deployment",
-            "microloan", "rural finance", "agri-finance", "cooperative"
-        ],
-    },
-    "impact_sector": {
+    "local_transit_corridor": {
         "score": 30,
         "keywords": [
-            "ngo", "nonprofit", "non-profit", "usaid", "chemonics", "dai",
-            "mercy corps", "kiva", "brac", "catholic relief services", "giz",
-            "accelerator", "grant", "program coordinator", "project manager",
-            "international development", "economic empowerment", "social impact",
-            "public service", "pslf"
+            "fort worth", "grapevine", "irving", "dallas", "tarrant county",
+            "dfw", "texas", "tx", "downtown fort worth"
         ],
     },
-    "technical_automation": {
-        "score": 25,
+    "target_role_titles": {
+        "score": 35,
         "keywords": [
-            "python", "apps script", "google apps script", "sql", "sas", "stata",
-            "prompt engineering", "ai-assisted", "automation", "dashboard",
-            "kpi", "m&e", "monitoring and evaluation", "data analytics",
-            "data specialist", "systems analyst", "salesforce", "hubspot",
-            "reconciliation", "invoice audit"
+            "program manager", "project manager", "program coordinator",
+            "project coordinator", "program associate", "operations associate",
+            "small business specialist", "business development specialist",
+            "grant manager", "grant coordinator", "m&e specialist",
+            "community outreach coordinator", "compliance specialist"
+        ],
+    },
+    "impact_and_public_sector": {
+        "score": 30,
+        "keywords": [
+            "ngo", "nonprofit", "non-profit", "public sector", "government",
+            "usaid", "sba", "small business administration", "hud", "chemonics",
+            "mercy corps", "kiva", "brac", "catholic relief services", "giz",
+            "financial inclusion", "microfinance", "economic development",
+            "community development", "pslf"
+        ],
+    },
+    "operations_tech_enabled": {
+        "score": 20,
+        "keywords": [
+            "excel", "spreadsheet", "data entry", "budget tracking",
+            "invoice audit", "reconciliation", "reporting", "dashboard",
+            "process improvement", "workflow", "crm", "salesforce", "hubspot",
+            "ai tools", "google apps script", "python", "stata"
         ],
     },
     "location_remote": {
-        "score": 10,
+        "score": 15,
         "keywords": [
-            "remote", "work from home", "telecommute", "us remote", "dallas",
-            "fort worth", "texas", "dfw", "anywhere"
+            "remote", "work from home", "telecommute", "us remote", "anywhere"
         ],
     },
 }
 
 EXCLUDED_KEYWORDS = [
+    # 1. Hard Exclusion: Construction & Civil Engineering
+    "construction", "civil engineer", "general contractor", "heavy equipment",
+    "superintendent", "building inspector", "estimator", "hvac", "plumbing",
+    "carpentry", "site supervisor", "safety officer - construction", "subcontractor",
+    
+    # 2. Hard Exclusion: Software Engineering & Senior Dev
+    "software engineer", "software developer", "full stack", "full-stack",
+    "backend engineer", "frontend engineer", "devops", "software architect",
+    "machine learning", "react developer", "rails engineer", "data engineer",
+    "qa engineer", "solutions architect", "web developer", ".net developer",
+    
+    # 3. Hard Exclusion: Commercial Sales & Wall St Banking
     "commercial bank", "investment banking", "wall street", "wealth management",
-    "retail banking", "corporate finance", "mortgage broker", "private equity associate",
+    "retail banking", "corporate finance", "mortgage broker", "private equity",
     "mortgage processor", "inside sales", "account executive dach", "brand designer"
 ]
 
-MATCH_THRESHOLD = 45  # Clean threshold for high-fit opportunities
+MATCH_THRESHOLD = 40  # Clean score threshold for targeted opportunities
 
 
 @dataclass
@@ -86,7 +104,7 @@ class JobPosting:
 
 
 # =====================================================================
-# SCORING ENGINE WITH DOMAIN GATEKEEPER
+# SCORING ENGINE
 # =====================================================================
 
 
@@ -106,10 +124,9 @@ def score_job(posting: JobPosting) -> JobPosting:
     # 2. Check for Domain Anchor Overlap
     has_domain_anchor = any(anchor in text_corpus for anchor in DOMAIN_ANCHORS)
     
-    # Apply penalty if missing non-profit / development domain context
-    if not has_domain_anchor and posting.source not in ["UN Jobs", "ReliefWeb API"]:
-        total_score -= 35
-        reasons.append("PENALTY (-35pt): Lacks explicit NGO / Development / Impact domain anchor")
+    if not has_domain_anchor and posting.source not in ["USAJOBS", "ReliefWeb API"]:
+        total_score -= 30
+        reasons.append("PENALTY (-30pt): Lacks explicit Program/Public/Non-Profit domain anchor")
 
     # 3. Positive Keyword Scoring
     for category, config in POSITIVE_WEIGHTS.items():
@@ -161,7 +178,7 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
                         organization=source_name,
                         source=source_name,
                         url=link.strip(),
-                        location="Remote / Global",
+                        location="Remote / DFW",
                         description=clean_html(description),
                         posted_date=pub_date[:16] if pub_date else "",
                     )
@@ -172,6 +189,53 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
     except Exception as e:
         print(f"      [{source_name}] Ingestion failed: {e}")
 
+    return postings
+
+
+def fetch_usajobs_feed() -> List[JobPosting]:
+    """Queries USAJOBS public Search API for non-construction Program/Project/Small Business roles in DFW & Remote."""
+    postings = []
+    # Search keywords tailored for public administration, small business, and program management
+    keywords = ["Program Manager", "Project Manager", "Small Business", "Grant Specialist"]
+    
+    headers = {
+        "User-Agent": "dresetar@gmail.com",
+        "Accept": "application/json"
+    }
+
+    for kw in keywords:
+        url = f"https://data.usajobs.gov/api/search?Keyword={kw}&LocationName=Fort Worth, Texas"
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get("SearchResult", {}).get("SearchResultItems", [])
+                for item in items:
+                    matched = item.get("MatchedObjectDescriptor", {})
+                    title = matched.get("PositionTitle", "N/A")
+                    org = matched.get("OrganizationName", "US Federal Government")
+                    job_url = matched.get("PositionURI", "")
+                    
+                    loc_arr = matched.get("PositionLocation", [])
+                    loc_name = loc_arr[0].get("LocationName", "Fort Worth, TX") if loc_arr else "Fort Worth, TX"
+                    summary = clean_html(matched.get("UserArea", {}).get("Details", {}).get("JobSummary", ""))
+                    pub_date = matched.get("PublicationStartDate", "")[:10]
+
+                    postings.append(
+                        JobPosting(
+                            title=title,
+                            organization=org,
+                            source="USAJOBS",
+                            url=job_url,
+                            location=loc_name,
+                            description=summary,
+                            posted_date=pub_date,
+                        )
+                    )
+        except Exception as e:
+            print(f"      [USAJOBS] Query failed for '{kw}': {e}")
+
+    print(f"      [USAJOBS] Total retrieved federal listings: {len(postings)}")
     return postings
 
 
@@ -261,14 +325,14 @@ def fetch_reliefweb_api() -> List[JobPosting]:
 
 
 def fetch_all_sources() -> List[JobPosting]:
-    """Aggregates listings across verified API and RSS sources."""
+    """Aggregates listings across Federal, Local Transit, Remote, and Non-Profit sources."""
     all_jobs = []
+
+    print("  -> Querying USAJOBS Federal Search...")
+    all_jobs.extend(fetch_usajobs_feed())
 
     print("  -> Querying Remotive Remote Jobs API...")
     all_jobs.extend(fetch_remotive_api())
-
-    print("  -> Querying UN Jobs RSS Feed...")
-    all_jobs.extend(fetch_rss_feed("https://unjobs.org/rss", "UN Jobs"))
 
     print("  -> Querying WeWorkRemotely RSS Feed...")
     all_jobs.extend(fetch_rss_feed("https://weworkremotely.com/remote-jobs.rss", "WeWorkRemotely"))
@@ -316,7 +380,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = recipient_email
-    msg["Subject"] = f"🚨 Targeted Job Alert: {len(matched_jobs)} High Match Position(s) Found"
+    msg["Subject"] = f"🚨 Target Job Alert: {len(matched_jobs)} DFW & Remote Position(s) Found"
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     try:
@@ -335,7 +399,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
 def run_job_monitor():
     print("=" * 70)
-    print(f"RUNNING AUTOMATED TARGETED JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RUNNING TARGETED JOB MONITOR (DFW / FEDERAL / REMOTE) — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
     # 1. Fetch Listings
