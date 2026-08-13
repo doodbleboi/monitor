@@ -1,10 +1,14 @@
 import json
+import os
 import re
+import smtplib
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Dict, List, Optional
 
 # =====================================================================
@@ -91,7 +95,7 @@ EXCLUDED_KEYWORDS = [
     "private equity associate",
 ]
 
-MATCH_THRESHOLD = 50  # Minimum score out of 100 to trigger alert
+MATCH_THRESHOLD = 50  # Minimum match score out of 100 to trigger alert
 
 
 @dataclass
@@ -133,7 +137,9 @@ def score_job(posting: JobPosting) -> JobPosting:
         if found:
             category_score = config["score"]
             total_score += category_score
-            reasons.append(f"{category.upper()} (+{category_score}pt): {', '.join(found[:4])}")
+            reasons.append(
+                f"{category.upper()} (+{category_score}pt): {', '.join(found[:4])}"
+            )
 
     posting.match_score = min(total_score, 100)
     posting.matched_reasons = reasons
@@ -145,8 +151,8 @@ def score_job(posting: JobPosting) -> JobPosting:
 # =====================================================================
 
 
-def fetch_reliefweb_jobs(limit: int = 40) -> List[JobPosting]:
-    """Fetches real-time humanitarian and development listings from ReliefWeb API."""
+def fetch_reliefweb_jobs(limit: int = 50) -> List[JobPosting]:
+    """Fetches real-time listings from ReliefWeb API."""
     url = "https://api.reliefweb.int/v2/jobs?appname=search-monitor&preset=latest"
 
     payload = {
@@ -191,7 +197,6 @@ def fetch_reliefweb_jobs(limit: int = 40) -> List[JobPosting]:
                     else ["Remote / Unspecified"]
                 )
                 location = ", ".join(loc_list)
-
                 created_date = fields.get("date", {}).get("created", "")
 
                 postings.append(
@@ -211,41 +216,53 @@ def fetch_reliefweb_jobs(limit: int = 40) -> List[JobPosting]:
     return postings
 
 
-def fetch_generic_rss(
-    rss_url: str, source_name: str, org_default: str = "Various"
-) -> List[JobPosting]:
-    """Fetches job postings from standard RSS feeds (e.g., Idealist / NGO feeds)."""
-    postings = []
-    req = urllib.request.Request(
-        rss_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    )
+# =====================================================================
+# EMAIL NOTIFICATION DISPATCHER
+# =====================================================================
+
+
+def send_email_alert(matched_jobs: List[JobPosting]):
+    """Sends an email alert via Gmail SMTP using environment variables."""
+    sender_email = os.environ.get("SENDER_EMAIL", "dresetar@gmail.com")
+    sender_password = os.environ.get("SENDER_PASSWORD")
+    recipient_email = os.environ.get("RECIPIENT_EMAIL", "raveonette85@gmail.com")
+
+    if not sender_password:
+        print("\n[INFO] SENDER_PASSWORD secret not set in environment. Skipping email dispatch.")
+        return
+
+    print(f"\n[EMAIL] Dispatching alert to {recipient_email} for {len(matched_jobs)} match(es)...")
+
+    # Construct Email Content
+    body_lines = [
+        f"Automated Job Search Monitor identified {len(matched_jobs)} high-match opportunity(ies):\n",
+        "=" * 70,
+        "",
+    ]
+
+    for idx, job in enumerate(matched_jobs, 1):
+        body_lines.append(f"[{idx}] {job.title} — {job.organization}")
+        body_lines.append(f"    Location:    {job.location}")
+        body_lines.append(f"    Match Score: {job.match_score}/100")
+        body_lines.append(f"    URL:         {job.url}")
+        body_lines.append("    Match Factors:")
+        for reason in job.matched_reasons:
+            body_lines.append(f"      - {reason}")
+        body_lines.append("-" * 70)
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = recipient_email
+    msg["Subject"] = f"🚨 Job Search Alert: {len(matched_jobs)} High Match Position(s) Found"
+    msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     try:
-        with urllib.request.urlopen(req) as response:
-            tree = ET.fromstring(response.read().decode("utf-8"))
-            channel = tree.find("channel")
-            if channel is not None:
-                for item in channel.findall("item"):
-                    title = item.findtext("title", "N/A")
-                    link = item.findtext("link", "")
-                    description = item.findtext("description", "")
-                    pub_date = item.findtext("pubDate", "")
-
-                    postings.append(
-                        JobPosting(
-                            title=title,
-                            organization=org_default,
-                            source=source_name,
-                            url=link,
-                            location="See Listing",
-                            description=description,
-                            posted_date=pub_date,
-                        )
-                    )
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+        print(f"[EMAIL] Alert successfully sent to {recipient_email}!")
     except Exception as e:
-        print(f"[WARN] RSS Feed ({source_name}) fetch skipped or unavailable: {e}")
-
-    return postings
+        print(f"[ERROR] Failed to send email alert: {e}")
 
 
 # =====================================================================
@@ -255,28 +272,18 @@ def fetch_generic_rss(
 
 def run_job_monitor():
     print("=" * 70)
-    print(
-        f"RUNNING AUTOMATED JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    )
+    print(f"RUNNING AUTOMATED JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
-    all_postings: List[JobPosting] = []
+    # 1. Fetch Listings
+    print("[1/2] Fetching job listings from ReliefWeb API...")
+    raw_postings = fetch_reliefweb_jobs(limit=50)
+    print(f"      Retrieved {len(raw_postings)} active listings.")
 
-    # 1. Fetch ReliefWeb API
-    print("[1/2] Querying ReliefWeb v2 REST API...")
-    rw_jobs = fetch_reliefweb_jobs(limit=50)
-    print(f"      Retrieved {len(rw_jobs)} active listings.")
-    all_postings.extend(rw_jobs)
-
-    # 2. Add additional feeds if needed
-    print("[2/2] Ingesting secondary feeds...")
-    # Example placeholder for external feeds
-    # idealist_jobs = fetch_generic_rss("https://www.idealist.org/en/feed/jobs", "Idealist RSS")
-    # all_postings.extend(idealist_jobs)
-
-    # 3. Score and Filter
+    # 2. Score Listings
+    print("[2/2] Running scoring and filtering engine...")
     scored_jobs: List[JobPosting] = []
-    for job in all_postings:
+    for job in raw_postings:
         scored = score_job(job)
         if scored.match_score >= MATCH_THRESHOLD:
             scored_jobs.append(scored)
@@ -284,30 +291,23 @@ def run_job_monitor():
     # Sort descending by match score
     scored_jobs.sort(key=lambda x: x.match_score, reverse=True)
 
-    # 4. Display Ranked Output
+    # 3. Output to Terminal Log
     print("\n" + "=" * 70)
-    print(
-        f"MATCH RESULTS: {len(scored_jobs)} High-Probability Opportunities Found (Score >= {MATCH_THRESHOLD})"
-    )
+    print(f"RESULTS: {len(scored_jobs)} High-Probability Matches Found (Score >= {MATCH_THRESHOLD})")
     print("=" * 70 + "\n")
 
     if not scored_jobs:
-        print(
-            "No listings exceeded the score threshold in this run. Try adjusting MATCH_THRESHOLD."
-        )
+        print("No new listings met the score threshold during this run.")
         return
 
     for idx, job in enumerate(scored_jobs, 1):
-        print(f"[{idx}] MATCH SCORE: {job.match_score}/100")
-        print(f"    Title:        {job.title}")
-        print(f"    Organization: {job.organization}")
-        print(f"    Location:     {job.location}")
-        print(f"    Source:       {job.source} | Date: {job.posted_date}")
-        print(f"    URL:          {job.url}")
-        print("    Match Factors:")
-        for reason in job.matched_reasons:
-            print(f"      - {reason}")
+        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.organization})")
+        print(f"    Location: {job.location}")
+        print(f"    URL:      {job.url}")
         print("-" * 70)
+
+    # 4. Dispatch Email Alert
+    send_email_alert(scored_jobs)
 
 
 if __name__ == "__main__":
