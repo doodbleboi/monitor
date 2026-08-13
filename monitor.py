@@ -1,13 +1,12 @@
-import json
 import os
 import smtplib
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Dict, List
-
 import requests
 
 # =====================================================================
@@ -79,6 +78,7 @@ POSITIVE_WEIGHTS = {
             "giz",
             "accelerator",
             "grant",
+            "program coordinator",
         ],
     },
 }
@@ -94,7 +94,7 @@ EXCLUDED_KEYWORDS = [
     "private equity associate",
 ]
 
-MATCH_THRESHOLD = 50  # Minimum match score out of 100 to trigger alert
+MATCH_THRESHOLD = 40  # Threshold set to 40 for broader capture
 
 
 @dataclass
@@ -146,101 +146,77 @@ def score_job(posting: JobPosting) -> JobPosting:
 
 
 # =====================================================================
-# INGESTION MODULES (API + RSS FALLBACK)
+# INGESTION ENGINES (MULTI-SOURCE)
 # =====================================================================
 
 
-def fetch_reliefweb_jobs(limit: int = 50) -> List[JobPosting]:
-    """
-    Fetches real-time listings from ReliefWeb.
-    Uses REST API primary engine and automatically fails over to RSS XML feed if WAF blocked.
-    """
+def clean_html(raw_html: str) -> str:
+    """Strips HTML tags for clean text scoring."""
+    cleanr = re.compile("<.*?>")
+    return re.sub(cleanr, "", raw_html or "")
+
+
+def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
+    """Robust namespace-agnostic RSS parser."""
     postings = []
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-    }
-
-    # --- PRIMARY ENGINE: REST API ---
-    api_url = "https://api.reliefweb.int/v2/jobs"
-    params = {
-        "appname": "apidoc",
-        "limit": str(limit),
-        "preset": "latest",
-        "query[value]": "financial inclusion OR microfinance OR data OR automation OR program coordinator",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     }
 
     try:
-        response = requests.get(api_url, params=params, headers=headers, timeout=12)
-        if response.status_code == 200:
-            data = response.json()
-            for item in data.get("data", []):
-                fields = item.get("fields", {})
-                title = fields.get("title", "N/A")
-                body = fields.get("body", "")
-                job_url = fields.get("url", "")
-                sources = fields.get("source", [])
-                org = sources[0].get("name", "Unknown") if sources else "Unknown"
+        resp = requests.get(feed_url, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            # Strip namespaces to avoid ElementTree parsing issues
+            xml_data = re.sub(r'xmlns="[^"]+"', "", resp.text)
+            root = ET.fromstring(xml_data)
 
-                countries = fields.get("country", [])
-                loc_list = (
-                    [c.get("name", "") for c in countries]
-                    if countries
-                    else ["Remote / Unspecified"]
-                )
-                location = ", ".join(loc_list)
-                created_date = fields.get("date", {}).get("created", "")
+            # Search for items or entries
+            items = root.findall(".//item") or root.findall(".//entry")
+            for item in items:
+                title = item.findtext("title") or "N/A"
+                link = item.findtext("link") or item.findtext("guid") or ""
+                description = item.findtext("description") or item.findtext("summary") or item.findtext("content") or ""
+                pub_date = item.findtext("pubDate") or item.findtext("updated") or ""
 
                 postings.append(
                     JobPosting(
-                        title=title,
-                        organization=org,
-                        source="ReliefWeb API",
-                        url=job_url,
-                        location=location,
-                        description=body,
-                        posted_date=created_date[:10] if created_date else "",
+                        title=title.strip(),
+                        organization=source_name,
+                        source=source_name,
+                        url=link.strip(),
+                        location="Remote / Global",
+                        description=clean_html(description),
+                        posted_date=pub_date[:16] if pub_date else "",
                     )
                 )
-            if postings:
-                print("      Successfully retrieved listings via ReliefWeb REST API.")
-                return postings
+            print(f"      [{source_name}] Retrieved {len(postings)} listings.")
         else:
-            print(f"      [WARN] API returned HTTP {response.status_code}. Initiating RSS failover...")
+            print(f"      [{source_name}] HTTP Status {resp.status_code}")
     except Exception as e:
-        print(f"      [WARN] API Request failed ({e}). Initiating RSS failover...")
-
-    # --- SECONDARY ENGINE: DIRECT RSS XML FAILOVER ---
-    print("      Executing ReliefWeb RSS feed fallback...")
-    rss_url = "https://reliefweb.int/jobs/rss.xml"
-    try:
-        rss_resp = requests.get(rss_url, headers=headers, timeout=12)
-        if rss_resp.status_code == 200:
-            root = ET.fromstring(rss_resp.content)
-            channel = root.find("channel")
-            if channel is not None:
-                for item in channel.findall("item"):
-                    title = item.findtext("title", "N/A")
-                    link = item.findtext("link", "")
-                    description = item.findtext("description", "")
-                    pub_date = item.findtext("pubDate", "")
-
-                    postings.append(
-                        JobPosting(
-                            title=title,
-                            organization="ReliefWeb RSS",
-                            source="ReliefWeb RSS",
-                            url=link,
-                            location="Global / Remote",
-                            description=description,
-                            posted_date=pub_date[:16] if pub_date else "",
-                        )
-                    )
-            print(f"      Successfully retrieved {len(postings)} listings via ReliefWeb RSS Feed.")
-    except Exception as e:
-        print(f"[ERROR] ReliefWeb RSS Fallback Failed: {e}")
+        print(f"      [{source_name}] Ingestion failed: {e}")
 
     return postings
+
+
+def fetch_all_sources() -> List[JobPosting]:
+    """Aggregates listings across multiple international development & social impact feeds."""
+    all_jobs = []
+
+    # 1. ReliefWeb RSS
+    print("  -> Querying ReliefWeb RSS Feed...")
+    all_jobs.extend(fetch_rss_feed("https://reliefweb.int/jobs/rss.xml", "ReliefWeb"))
+
+    # 2. Idealist Remote Jobs RSS
+    print("  -> Querying Idealist.org Remote Feeds...")
+    idealist_url = "https://www.idealist.org/en/feed/jobs?q=financial+inclusion+OR+microfinance+OR+data+OR+program"
+    all_jobs.extend(fetch_rss_feed(idealist_url, "Idealist.org"))
+
+    # 3. UN Jobs International Development Feed
+    print("  -> Querying UN Jobs RSS Feed...")
+    unjobs_url = "https://unjobs.org/rss/jobs"
+    all_jobs.extend(fetch_rss_feed(unjobs_url, "UN Jobs"))
+
+    return all_jobs
 
 
 # =====================================================================
@@ -260,7 +236,6 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
     print(f"\n[EMAIL] Dispatching alert to {recipient_email} for {len(matched_jobs)} match(es)...")
 
-    # Construct Email Content
     body_lines = [
         f"Automated Job Search Monitor identified {len(matched_jobs)} high-match opportunity(ies):\n",
         "=" * 70,
@@ -269,6 +244,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
     for idx, job in enumerate(matched_jobs, 1):
         body_lines.append(f"[{idx}] {job.title} — {job.organization}")
+        body_lines.append(f"    Source:      {job.source}")
         body_lines.append(f"    Location:    {job.location}")
         body_lines.append(f"    Match Score: {job.match_score}/100")
         body_lines.append(f"    URL:         {job.url}")
@@ -299,18 +275,24 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
 def run_job_monitor():
     print("=" * 70)
-    print(f"RUNNING AUTOMATED JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RUNNING AUTOMATED MULTI-SOURCE JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
     # 1. Fetch Listings
-    print("[1/2] Fetching job listings from ReliefWeb...")
-    raw_postings = fetch_reliefweb_jobs(limit=50)
-    print(f"      Total retrieved active listings: {len(raw_postings)}")
+    print("[1/2] Fetching job listings across feeds...")
+    raw_postings = fetch_all_sources()
+    print(f"      Total retrieved raw listings: {len(raw_postings)}")
 
     # 2. Score Listings
     print("[2/2] Running scoring and filtering engine...")
     scored_jobs: List[JobPosting] = []
+    seen_urls = set()
+
     for job in raw_postings:
+        if job.url in seen_urls:
+            continue
+        seen_urls.add(job.url)
+
         scored = score_job(job)
         if scored.match_score >= MATCH_THRESHOLD:
             scored_jobs.append(scored)
@@ -318,7 +300,7 @@ def run_job_monitor():
     # Sort descending by match score
     scored_jobs.sort(key=lambda x: x.match_score, reverse=True)
 
-    # 3. Output to Terminal Log
+    # 3. Output Results
     print("\n" + "=" * 70)
     print(f"RESULTS: {len(scored_jobs)} High-Probability Matches Found (Score >= {MATCH_THRESHOLD})")
     print("=" * 70 + "\n")
@@ -328,9 +310,8 @@ def run_job_monitor():
         return
 
     for idx, job in enumerate(scored_jobs, 1):
-        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.organization})")
-        print(f"    Location: {job.location}")
-        print(f"    URL:      {job.url}")
+        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.source})")
+        print(f"    URL: {job.url}")
         print("-" * 70)
 
     # 4. Dispatch Email Alert
