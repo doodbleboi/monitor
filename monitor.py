@@ -152,8 +152,8 @@ def score_job(posting: JobPosting) -> JobPosting:
 
 
 def fetch_reliefweb_jobs(limit: int = 50) -> List[JobPosting]:
-    """Fetches real-time listings from ReliefWeb API."""
-    url = "https://api.reliefweb.int/v2/jobs?appname=search-monitor&preset=latest"
+    """Fetches real-time listings from ReliefWeb API with custom User-Agent headers."""
+    url = "https://api.reliefweb.int/v2/jobs?appname=job-search-monitor&preset=latest"
 
     payload = {
         "limit": limit,
@@ -173,7 +173,11 @@ def fetch_reliefweb_jobs(limit: int = 50) -> List[JobPosting]:
         },
     }
 
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 (JobSearchMonitor/1.0)",
+    }
+    
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers
     )
@@ -281,34 +285,3 @@ def run_job_monitor():
     print(f"      Retrieved {len(raw_postings)} active listings.")
 
     # 2. Score Listings
-    print("[2/2] Running scoring and filtering engine...")
-    scored_jobs: List[JobPosting] = []
-    for job in raw_postings:
-        scored = score_job(job)
-        if scored.match_score >= MATCH_THRESHOLD:
-            scored_jobs.append(scored)
-
-    # Sort descending by match score
-    scored_jobs.sort(key=lambda x: x.match_score, reverse=True)
-
-    # 3. Output to Terminal Log
-    print("\n" + "=" * 70)
-    print(f"RESULTS: {len(scored_jobs)} High-Probability Matches Found (Score >= {MATCH_THRESHOLD})")
-    print("=" * 70 + "\n")
-
-    if not scored_jobs:
-        print("No new listings met the score threshold during this run.")
-        return
-
-    for idx, job in enumerate(scored_jobs, 1):
-        print(f"[{idx}] SCORE: {job.match_score}/100 | {job.title} ({job.organization})")
-        print(f"    Location: {job.location}")
-        print(f"    URL:      {job.url}")
-        print("-" * 70)
-
-    # 4. Dispatch Email Alert
-    send_email_alert(scored_jobs)
-
-
-if __name__ == "__main__":
-    run_job_monitor()
