@@ -13,93 +13,63 @@ import requests
 # CANDIDATE MATCH VECTOR CONFIGURATION
 # =====================================================================
 
+# Primary Domain Anchors - At least one required to avoid commercial penalty
+DOMAIN_ANCHORS = [
+    "financial inclusion", "microfinance", "vsla", "silc", "village savings",
+    "community loan", "credit scoring", "underwriting", "capital deployment",
+    "microloan", "rural finance", "ngo", "nonprofit", "non-profit", "usaid",
+    "chemonics", "dai", "mercy corps", "kiva", "brac", "catholic relief services",
+    "giz", "accelerator", "grant", "m&e", "monitoring and evaluation",
+    "international development", "economic empowerment", "social impact",
+    "public sector", "un jobs", "undp", "world bank", "humanitarian",
+    "civil society", "cooperative"
+]
+
 POSITIVE_WEIGHTS = {
     "domain_microfinance": {
+        "score": 35,
+        "keywords": [
+            "financial inclusion", "microfinance", "vsla", "silc", "village savings",
+            "community loans", "credit scoring", "underwriting", "capital deployment",
+            "microloan", "rural finance", "agri-finance", "cooperative"
+        ],
+    },
+    "impact_sector": {
         "score": 30,
         "keywords": [
-            "financial inclusion",
-            "microfinance",
-            "vsla",
-            "silc",
-            "village savings",
-            "community loans",
-            "credit scoring",
-            "underwriting",
-            "capital deployment",
-            "microloan",
-            "rural finance",
+            "ngo", "nonprofit", "non-profit", "usaid", "chemonics", "dai",
+            "mercy corps", "kiva", "brac", "catholic relief services", "giz",
+            "accelerator", "grant", "program coordinator", "project manager",
+            "international development", "economic empowerment", "social impact",
+            "public service", "pslf"
         ],
     },
     "technical_automation": {
         "score": 25,
         "keywords": [
-            "python",
-            "apps script",
-            "google apps script",
-            "sql",
-            "sas",
-            "stata",
-            "prompt engineering",
-            "ai-assisted",
-            "automation",
-            "dashboard",
-            "kpi",
-            "m&e",
-            "monitoring and evaluation",
-            "data analytics",
-            "data specialist",
-            "systems analyst",
+            "python", "apps script", "google apps script", "sql", "sas", "stata",
+            "prompt engineering", "ai-assisted", "automation", "dashboard",
+            "kpi", "m&e", "monitoring and evaluation", "data analytics",
+            "data specialist", "systems analyst", "salesforce", "hubspot",
+            "reconciliation", "invoice audit"
         ],
     },
     "location_remote": {
-        "score": 25,
+        "score": 10,
         "keywords": [
-            "remote",
-            "work from home",
-            "telecommute",
-            "us remote",
-            "dallas",
-            "fort worth",
-            "texas",
-            "dfw",
-            "anywhere",
-        ],
-    },
-    "impact_sector": {
-        "score": 20,
-        "keywords": [
-            "ngo",
-            "nonprofit",
-            "non-profit",
-            "usaid",
-            "chemonics",
-            "dai",
-            "mercy corps",
-            "kiva",
-            "brac",
-            "catholic relief services",
-            "giz",
-            "accelerator",
-            "grant",
-            "program coordinator",
-            "project manager",
-            "international development",
+            "remote", "work from home", "telecommute", "us remote", "dallas",
+            "fort worth", "texas", "dfw", "anywhere"
         ],
     },
 }
 
 EXCLUDED_KEYWORDS = [
-    "commercial bank",
-    "investment banking",
-    "wall street",
-    "wealth management",
-    "retail banking",
-    "corporate finance",
-    "mortgage broker",
-    "private equity associate",
+    "commercial bank", "investment banking", "wall street", "wealth management",
+    "retail banking", "corporate finance", "mortgage broker", "private equity associate",
+    "mortgage processor", "inside sales", "account executive dach", "brand designer"
 ]
 
-MATCH_THRESHOLD = 35  # Score threshold set to 35 for optimal capture
+MATCH_THRESHOLD = 45  # Clean threshold for high-fit opportunities
 
 
 @dataclass
@@ -116,42 +86,46 @@ class JobPosting:
 
 
 # =====================================================================
-# SCORING ENGINE
+# SCORING ENGINE WITH DOMAIN GATEKEEPER
 # =====================================================================
 
 
 def score_job(posting: JobPosting) -> JobPosting:
     text_corpus = f"{posting.title} {posting.description} {posting.location} {posting.organization}".lower()
 
-    # 1. Check Exclusion List
+    # 1. Check Hard Exclusion List
     for excluded in EXCLUDED_KEYWORDS:
         if excluded in text_corpus:
             posting.match_score = -100
-            posting.matched_reasons.append(
-                f"DISQUALIFIED: Matches excluded term '{excluded}'"
-            )
+            posting.matched_reasons.append(f"DISQUALIFIED: Matches excluded term '{excluded}'")
             return posting
 
     total_score = 0
     reasons = []
 
-    # 2. Positive Keyword Matching
+    # 2. Check for Domain Anchor Overlap
+    has_domain_anchor = any(anchor in text_corpus for anchor in DOMAIN_ANCHORS)
+    
+    # Apply penalty if missing non-profit / development domain context
+    if not has_domain_anchor and posting.source not in ["UN Jobs", "ReliefWeb API"]:
+        total_score -= 35
+        reasons.append("PENALTY (-35pt): Lacks explicit NGO / Development / Impact domain anchor")
+
+    # 3. Positive Keyword Scoring
     for category, config in POSITIVE_WEIGHTS.items():
         found = [kw for kw in config["keywords"] if kw in text_corpus]
         if found:
             category_score = config["score"]
             total_score += category_score
-            reasons.append(
-                f"{category.upper()} (+{category_score}pt): {', '.join(found[:4])}"
-            )
+            reasons.append(f"{category.upper()} (+{category_score}pt): {', '.join(found[:4])}")
 
-    posting.match_score = min(total_score, 100)
+    posting.match_score = max(0, min(total_score, 100))
     posting.matched_reasons = reasons
     return posting
 
 
 # =====================================================================
-# INGESTION MODULES (STABLE & VERIFIED ENDPOINTS)
+# INGESTION MODULES
 # =====================================================================
 
 
@@ -202,7 +176,7 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
 
 
 def fetch_remotive_api() -> List[JobPosting]:
-    """Queries Remotive's public remote jobs API (JSON, highly reliable)."""
+    """Queries Remotive's public remote jobs API."""
     postings = []
     url = "https://remotive.com/api/remote-jobs"
     headers = {
@@ -323,7 +297,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
     print(f"\n[EMAIL] Dispatching alert to {recipient_email} for {len(matched_jobs)} match(es)...")
 
     body_lines = [
-        f"Automated Job Search Monitor identified {len(matched_jobs)} high-match opportunity(ies):\n",
+        f"Automated Job Search Monitor identified {len(matched_jobs)} targeted opportunity(ies):\n",
         "=" * 70,
         "",
     ]
@@ -342,7 +316,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
     msg = MIMEMultipart()
     msg["From"] = sender_email
     msg["To"] = recipient_email
-    msg["Subject"] = f"🚨 Job Search Alert: {len(matched_jobs)} High Match Position(s) Found"
+    msg["Subject"] = f"🚨 Targeted Job Alert: {len(matched_jobs)} High Match Position(s) Found"
     msg.attach(MIMEText("\n".join(body_lines), "plain"))
 
     try:
@@ -361,7 +335,7 @@ def send_email_alert(matched_jobs: List[JobPosting]):
 
 def run_job_monitor():
     print("=" * 70)
-    print(f"RUNNING AUTOMATED MULTI-SOURCE JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"RUNNING AUTOMATED TARGETED JOB MONITOR — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
     # 1. Fetch Listings
