@@ -21,7 +21,6 @@ DOMAIN_ANCHORS = [
     "usaid", "public sector", "city of fort worth", "tarrant county", "city of dallas",
     "usajobs", "sba", "m&e", "monitoring and evaluation", "economic development", 
     "social impact", "pslf", "refugee", "resettlement", "caseworker", "economic empowerment",
-    # Elite Track Extensions
     "gender-lens investing", "gli", "2x challenge", "2x criteria", "2x global",
     "blended finance", "concessional capital", "climate-smart agribusiness", "rural finance"
 ]
@@ -120,7 +119,7 @@ def score_job(posting: JobPosting) -> JobPosting:
 
     # 2. Check for Domain Anchor Overlap
     has_domain_anchor = any(anchor in text_corpus for anchor in DOMAIN_ANCHORS)
-    if not has_domain_anchor and posting.source not in ["USAJOBS", "ReliefWeb API"]:
+    if not has_domain_anchor and posting.source not in ["USAJOBS", "ReliefWeb API", "Devex API", "2X Global"]:
         total_score -= 30
         reasons.append("PENALTY (-30pt): Lacks explicit Program/Public/Non-Profit domain anchor")
 
@@ -143,15 +142,13 @@ def score_job(posting: JobPosting) -> JobPosting:
 
 
 # =====================================================================
-# INGESTION MODULE
+# INGESTION MODULES (RSS & DEVEX/2X JSON API PARSERS)
 # =====================================================================
 
 def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
     """Parses standard RSS XML feeds reliably."""
     postings = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 Automation Monitor"}
 
     try:
         resp = requests.get(feed_url, headers=headers, timeout=12)
@@ -172,7 +169,7 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
                         organization=source_name,
                         source=source_name,
                         url=link.strip(),
-                        location="Remote / DFW",
+                        location="Remote / International",
                         description=clean_html(description),
                         posted_date=pub_date[:16] if pub_date else "",
                     )
@@ -182,3 +179,60 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
         print(f"      [ERROR] Failed to fetch {source_name}: {str(e)}")
         
     return postings
+
+
+def fetch_devex_jobs() -> List[JobPosting]:
+    """Pulls open job listings directly from Devex API endpoint."""
+    postings = []
+    # Devex public-facing layout query parameters
+    url = "https://devex.com"
+    params = {
+        "filter[keywords]": "finance",
+        "page[size]": 15,
+        "sort": "-posted_at"
+    }
+    headers = {"User-Agent": "Mozilla/5.0 JobSearchEngine/1.0"}
+
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            data = resp.json().get("data", [])
+            for job in data:
+                attrs = job.get("attributes", {})
+                title = attrs.get("title", "N/A")
+                org = attrs.get("company_name", "Devex Node")
+                slug = attrs.get("slug", "")
+                link = f"https://devex.com{slug}" if slug else "https://devex.com"
+                desc = attrs.get("description", "") or attrs.get("summary", "")
+                date_str = attrs.get("posted_at", "")
+
+                postings.append(
+                    JobPosting(
+                        title=title,
+                        organization=org,
+                        source="Devex API",
+                        url=link,
+                        location="Remote / Relocation",
+                        description=clean_html(desc),
+                        posted_date=date_str[:10] if date_str else ""
+                    )
+                )
+            print(f"      [Devex API] Retrieved {len(postings)} positions.")
+    except Exception as e:
+        print(f"      [ERROR] Devex engine extraction failed: {str(e)}")
+    return postings
+
+
+def fetch_2xglobal_jobs() -> List[JobPosting]:
+    """Scrapes open-source program notices or careers directly from 2X Global framework nodes."""
+    postings = []
+    # Targets the structured json payload configuration for 2X partnerships/news boards
+    url = "https://2xglobal.org" 
+    headers = {"User-Agent": "Mozilla/5.0 Tracker"}
+    
+    try:
+        # Fallback to general data structure if structural CMS API endpoint handles authentication changes
+        resp = requests.get(url, headers=headers, timeout=12)
+        if resp.status_code == 200:
+            items = resp.json().get("items", [])
+            for item in items:
