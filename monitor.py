@@ -184,7 +184,6 @@ def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
 def fetch_devex_jobs() -> List[JobPosting]:
     """Pulls open job listings directly from Devex API endpoint."""
     postings = []
-    # Devex public-facing layout query parameters
     url = "https://devex.com"
     params = {
         "filter[keywords]": "finance",
@@ -226,13 +225,15 @@ def fetch_devex_jobs() -> List[JobPosting]:
 def fetch_2xglobal_jobs() -> List[JobPosting]:
     """Scrapes open-source program notices or careers directly from 2X Global framework nodes."""
     postings = []
-    # Targets the structured json payload configuration for 2X partnerships/news boards
     url = "https://2xglobal.org" 
     headers = {"User-Agent": "Mozilla/5.0 Tracker"}
     
     try:
-        # Fallback to general data structure if structural CMS API endpoint handles authentication changes
         resp = requests.get(url, headers=headers, timeout=12)
         if resp.status_code == 200:
             items = resp.json().get("items", [])
             for item in items:
+                if "job" in item.get("tags", []) or "career" in item.get("title", "").lower():
+                    postings.append(
+                        JobPosting(
+                            title=item.get("title", "Framework Specialist"),
