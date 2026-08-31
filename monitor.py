@@ -1,14 +1,17 @@
 import os
 import re
-import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, List, Optional
+import json
+import asyncio
+import smtplib
+from dataclasses import dataclass, field, asdict
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from typing import List
 import requests
+from playwright.async_api import async_playwright, BrowserContext, Page
 
 # =====================================================================
-# CANDIDATE MATCH VECTOR CONFIGURATION (TAILORED FOR DAVID RESETAR)
-# Target: Financial Inclusion, Microfinance, Microinsurance, 2X Criteria / GLI
+# CONFIGURATION & KEYWORD VECTORS
 # =====================================================================
 
 DOMAIN_ANCHORS = [
@@ -17,8 +20,7 @@ DOMAIN_ANCHORS = [
     "financial inclusion", "microfinance", "microinsurance", "rural finance",
     "blended finance", "gender-lens investing", "gender lens", "gli", "2x challenge",
     "2x criteria", "2x global", "concessional finance", "economic recovery",
-    "livelihoods", "impact investing", "development finance", "dfi", "fintech for good",
-    "alternative credit", "digital identity", "credit scoring"
+    "livelihoods", "impact investing", "development finance", "dfi", "alternative credit"
 ]
 
 POSITIVE_WEIGHTS = {
@@ -67,7 +69,6 @@ EXCLUDED_KEYWORDS = [
 
 MATCH_THRESHOLD = 35
 
-
 @dataclass
 class JobPosting:
     title: str
@@ -76,41 +77,32 @@ class JobPosting:
     url: str
     location: str
     description: str
-    posted_date: str
+    posted_date: str = ""
     match_score: int = 0
     matched_reasons: List[str] = field(default_factory=list)
 
-
-# =====================================================================
-# SCORING ENGINE
-# =====================================================================
-
-def clean_html(raw_html: str) -> str:
-    """Strips HTML tags for clean text scoring."""
+def clean_text(raw_text: str) -> str:
     cleanr = re.compile(r"<.*?>")
-    return re.sub(cleanr, "", raw_html or "")
-
+    cleaned = re.sub(cleanr, "", raw_text or "")
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 def score_job(posting: JobPosting) -> JobPosting:
     text_corpus = f"{posting.title} {posting.description} {posting.location} {posting.organization}".lower()
 
-    # 1. Hard Exclusion Check
     for excluded in EXCLUDED_KEYWORDS:
         if excluded in text_corpus:
             posting.match_score = -100
-            posting.matched_reasons.append(f"DISQUALIFIED: Matches excluded term '{excluded}'")
+            posting.matched_reasons.append(f"Excluded term: {excluded}")
             return posting
 
     total_score = 0
     reasons = []
 
-    # 2. Domain Anchor Validation
-    has_domain_anchor = any(anchor in text_corpus for anchor in DOMAIN_ANCHORS)
-    if not has_domain_anchor and posting.source not in ["ReliefWeb API", "2X Global", "Devex"]:
+    has_anchor = any(anchor in text_corpus for anchor in DOMAIN_ANCHORS)
+    if not has_anchor and posting.source not in ["ReliefWeb API", "2X Global", "Devex (Auth)"]:
         total_score -= 25
-        reasons.append("PENALTY (-25pt): Lacks explicit Development/Inclusion domain anchor")
+        reasons.append("Lacks explicit domain anchor (-25pt)")
 
-    # 3. Positive Weighted Category Scoring
     for category, config in POSITIVE_WEIGHTS.items():
         found = [kw for kw in config["keywords"] if kw in text_corpus]
         if found:
@@ -122,139 +114,221 @@ def score_job(posting: JobPosting) -> JobPosting:
     posting.matched_reasons = reasons
     return posting
 
-
 # =====================================================================
-# INGESTION MODULES
+# PLAYWRIGHT SCRAPERS
 # =====================================================================
 
-def fetch_reliefweb_api() -> List[JobPosting]:
-    """Queries ReliefWeb REST API for Financial Inclusion & Economic Recovery listings."""
-    postings = []
+async def scrape_devex(context: BrowserContext) -> List[JobPosting]:
+    jobs = []
+    page = await context.new_page()
+    email = os.getenv("DEVEX_EMAIL")
+    password = os.getenv("DEVEX_PASSWORD")
+
+    try:
+        target_url = "https://www.devex.com/jobs/search?filter%5Bkeywords%5D%5B%5D=financial%20inclusion"
+        await page.goto(target_url, wait_until="domcontentloaded")
+
+        if "login" in page.url and email and password:
+            await page.fill('input[type="email"], input[name="email"]', email)
+            await page.fill('input[type="password"], input[name="password"]', password)
+            await page.click('button[type="submit"], input[type="submit"]')
+            await page.wait_for_load_state("networkidle")
+            await page.goto(target_url, wait_until="domcontentloaded")
+
+        await page.wait_for_selector(".job-card, .job-item, [data-qa='job-card']", timeout=8000)
+        cards = await page.query_selector_all(".job-card, .job-item, [data-qa='job-card']")
+
+        for card in cards[:15]:
+            title_elem = await card.query_selector("h3, .title, [data-qa='job-title']")
+            org_elem = await card.query_selector(".organization, .company, [data-qa='job-organization']")
+            loc_elem = await card.query_selector(".location, [data-qa='job-location']")
+            link_elem = await card.query_selector("a[href*='/jobs/']")
+            desc_elem = await card.query_selector(".summary, .description, p")
+
+            title = clean_text(await title_elem.inner_text()) if title_elem else "N/A"
+            org = clean_text(await org_elem.inner_text()) if org_elem else "Devex Partner"
+            loc = clean_text(await loc_elem.inner_text()) if loc_elem else "Remote / Global Node"
+            desc = clean_text(await desc_elem.inner_text()) if desc_elem else ""
+            
+            url = "https://www.devex.com"
+            if link_elem:
+                href = await link_elem.get_attribute("href")
+                if href:
+                    url = href if href.startswith("http") else f"https://www.devex.com{href}"
+
+            jobs.append(JobPosting(title=title, organization=org, source="Devex (Auth)", url=url, location=loc, description=desc))
+    except Exception as e:
+        print(f"[-] Devex scrape notice: {str(e)}")
+    finally:
+        await page.close()
+    return jobs
+
+async def scrape_2xglobal(context: BrowserContext) -> List[JobPosting]:
+    jobs = []
+    page = await context.new_page()
+    email = os.getenv("TWO_X_GLOBAL_EMAIL")
+    password = os.getenv("TWO_X_GLOBAL_PASSWORD")
+
+    try:
+        portal_url = "https://www.2xglobal.org/member-portal/opportunities"
+        await page.goto(portal_url, wait_until="domcontentloaded")
+
+        if ("login" in page.url or await page.query_selector('input[type="password"]')) and email and password:
+            await page.fill('input[type="email"], input[name="email"], input[name="username"]', email)
+            await page.fill('input[type="password"], input[name="password"]', password)
+            await page.click('button[type="submit"], input[type="submit"]')
+            await page.wait_for_load_state("networkidle")
+            await page.goto(portal_url, wait_until="domcontentloaded")
+
+        await page.wait_for_selector(".opportunity-item, .post-item, .card", timeout=6000)
+        items = await page.query_selector_all(".opportunity-item, .post-item, .card")
+
+        for item in items[:15]:
+            title_elem = await item.query_selector("h2, h3, .title")
+            org_elem = await item.query_selector(".organization, .meta-org, .author")
+            link_elem = await item.query_selector("a")
+            body_elem = await item.query_selector(".content, .body, p")
+
+            title = clean_text(await title_elem.inner_text()) if title_elem else "GLI Project Mandate"
+            org = clean_text(await org_elem.inner_text()) if org_elem else "2X Global Member Fund"
+            desc = clean_text(await body_elem.inner_text()) if body_elem else ""
+
+            url = "https://www.2xglobal.org"
+            if link_elem:
+                href = await link_elem.get_attribute("href")
+                if href:
+                    url = href if href.startswith("http") else f"https://www.2xglobal.org{href}"
+
+            jobs.append(JobPosting(title=title, organization=org, source="2X Global", url=url, location="Global / Remote", description=desc))
+    except Exception as e:
+        print(f"[-] 2X Global scrape notice: {str(e)}")
+    finally:
+        await page.close()
+    return jobs
+
+def fetch_reliefweb() -> List[JobPosting]:
+    jobs = []
     url = "https://api.reliefweb.int/v1/jobs"
     params = {
-        "appname": "david-career-monitor",
-        "query[value]": "financial inclusion OR microfinance OR microinsurance OR economic recovery OR blended finance",
+        "appname": "career-monitor",
+        "query[value]": "financial inclusion OR microfinance OR microinsurance OR blended finance",
         "limit": 20,
         "profile": "full",
         "sort[]": "date:desc"
     }
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
     try:
-        resp = requests.get(url, params=params, headers=headers, timeout=12)
+        resp = requests.get(url, params=params, timeout=12)
         if resp.status_code == 200:
-            data = resp.json().get("data", [])
-            for item in data:
-                fields = item.get("fields", {})
-                title = fields.get("title", "N/A")
-                org_info = fields.get("source", [{}])[0]
-                org = org_info.get("name", "International NGO")
-                job_url = fields.get("url", "")
-                
-                # Extract location safely
-                cities = fields.get("city", [])
-                countries = fields.get("country", [])
-                loc = "Remote / International"
-                if countries:
-                    loc = countries[0].get("name", "Global")
-                if cities:
-                    loc = f"{cities[0].get('name')}, {loc}"
-
-                body = fields.get("body", "") or fields.get("body-html", "")
-                date_str = fields.get("date", {}).get("created", "")
-
-                postings.append(
-                    JobPosting(
-                        title=title.strip(),
-                        organization=org.strip(),
-                        source="ReliefWeb API",
-                        url=job_url.strip(),
-                        location=loc,
-                        description=clean_html(body),
-                        posted_date=date_str[:10] if date_str else ""
-                    )
-                )
-            print(f"      [ReliefWeb API] Ingested {len(postings)} positions.")
+            for item in resp.json().get("data", []):
+                f = item.get("fields", {})
+                org = f.get("source", [{}])[0].get("name", "International NGO")
+                countries = f.get("country", [])
+                loc = countries[0].get("name", "Global") if countries else "Remote / International"
+                jobs.append(JobPosting(
+                    title=f.get("title", "N/A"),
+                    organization=org,
+                    source="ReliefWeb API",
+                    url=f.get("url", ""),
+                    location=loc,
+                    description=clean_text(f.get("body", "") or f.get("body-html", ""))
+                ))
     except Exception as e:
-        print(f"      [ERROR] ReliefWeb fetch failed: {str(e)}")
-
-    return postings
-
-
-def fetch_rss_feed(feed_url: str, source_name: str) -> List[JobPosting]:
-    """Parses standard RSS XML feeds reliably."""
-    postings = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Monitor/1.0"}
-
-    try:
-        resp = requests.get(feed_url, headers=headers, timeout=12)
-        if resp.status_code == 200:
-            xml_data = re.sub(r'xmlns="[^"]+"', "", resp.text)
-            root = ET.fromstring(xml_data)
-
-            items = root.findall(".//item") or root.findall(".//entry")
-            for item in items:
-                title = item.findtext("title") or "N/A"
-                link = item.findtext("link") or item.findtext("guid") or ""
-                description = item.findtext("description") or item.findtext("summary") or item.findtext("content") or ""
-                pub_date = item.findtext("pubDate") or item.findtext("updated") or ""
-
-                postings.append(
-                    JobPosting(
-                        title=title.strip(),
-                        organization=source_name,
-                        source=source_name,
-                        url=link.strip(),
-                        location="Remote / Global Node",
-                        description=clean_html(description),
-                        posted_date=pub_date[:16] if pub_date else "",
-                    )
-                )
-            print(f"      [{source_name}] Ingested {len(postings)} entries.")
-    except Exception as e:
-        print(f"      [ERROR] Failed to fetch {source_name}: {str(e)}")
-
-    return postings
-
+        print(f"[-] ReliefWeb error: {str(e)}")
+    return jobs
 
 # =====================================================================
-# SYSTEM PIPELINE EXECUTION
+# EMAIL DISPATCH
 # =====================================================================
 
-def execution_pipeline():
-    print("[*] Initiating International Development & GLI Monitor...")
-    all_jobs: List[JobPosting] = []
+def send_email_digest(matches: List[JobPosting]):
+    sender = os.getenv("SENDER_EMAIL")
+    password = os.getenv("SENDER_PASSWORD")
+    recipient = os.getenv("RECIPIENT_EMAIL")
 
-    # 1. Structured REST API Sources
-    all_jobs.extend(fetch_reliefweb_api())
+    if not sender or not password or not recipient:
+        print("[-] Email secrets not fully configured. Skipping dispatch.")
+        return
 
-    # 2. Add Valid Remote / Social Impact RSS Feeds
-    rss_sources = [
-        ("https://weworkremotely.com/categories/remote-management-and-finance-jobs.rss", "WeWorkRemotely Finance"),
-        ("https://remotive.com/remote-jobs/feed", "Remotive Feed")
-    ]
-    for url, source in rss_sources:
-        all_jobs.extend(fetch_rss_feed(url, source))
+    if not matches:
+        print("[*] No matches above threshold today. No email dispatched.")
+        return
 
-    print(f"\n[*] Processing and scoring {len(all_jobs)} cumulative listings...")
-    matched_portfolio: List[JobPosting] = []
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"🎯 Daily Pipeline: {len(matches)} Microfinance & GLI Matches"
+    msg["From"] = sender
+    msg["To"] = recipient
 
-    for job in all_jobs:
-        scored = score_job(job)
-        if scored.match_score >= MATCH_THRESHOLD:
-            matched_portfolio.append(scored)
+    rows = ""
+    for j in matches:
+        reasons_html = "".join(f"<li>{r}</li>" for r in j.matched_reasons)
+        rows += f"""
+        <div style="margin-bottom: 20px; padding: 15px; border-left: 4px solid #0056b3; background-color: #f8f9fa;">
+            <h3 style="margin: 0 0 6px 0; color: #111;">
+                <a href="{j.url}" style="color: #0056b3; text-decoration: none;">{j.title}</a>
+            </h3>
+            <p style="margin: 0 0 8px 0; font-size: 14px; color: #555;">
+                <strong>{j.organization}</strong> | {j.location} | <em>{j.source}</em> | <strong>Score: {j.match_score}/100</strong>
+            </p>
+            <ul style="margin: 0; padding-left: 20px; font-size: 13px; color: #333;">
+                {reasons_html}
+            </ul>
+        </div>
+        """
 
-    # Sort matching jobs by match score descending
-    matched_portfolio.sort(key=lambda x: x.match_score, reverse=True)
+    html_body = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.5; color: #333;">
+            <h2>Daily Financial Inclusion &amp; GLI Opportunities</h2>
+            <p>Found <strong>{len(matches)}</strong> high-yield roles exceeding the matching threshold:</p>
+            {rows}
+        </body>
+    </html>
+    """
+    msg.attach(MIMEText(html_body, "html"))
 
-    print(f"\n[+] Pipeline completed. Found {len(matched_portfolio)} high-alignment matches.\n")
-    for idx, match in enumerate(matched_portfolio[:5], 1):
-        print(f"{idx}. [{match.match_score} pts] {match.title}")
-        print(f"   Org: {match.organization} | Location: {match.location} | Source: {match.source}")
-        print(f"   URL: {match.url}")
-        print(f"   Match Factors: {'; '.join(match.matched_reasons[:2])}")
-        print("   " + "-" * 60)
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(sender, password)
+            server.sendmail(sender, recipient, msg.as_string())
+        print(f"[+] Successfully sent digest with {len(matches)} matches to {recipient}.")
+    except Exception as e:
+        print(f"[-] SMTP send failed: {str(e)}")
 
+# =====================================================================
+# MAIN WORKFLOW
+# =====================================================================
+
+async def main():
+    all_jobs = []
+    
+    # 1. API fetch
+    all_jobs.extend(fetch_reliefweb())
+
+    # 2. Authenticated Playwright scraping
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        
+        devex_jobs = await scrape_devex(context)
+        two_x_jobs = await scrape_2xglobal(context)
+        
+        all_jobs.extend(devex_jobs)
+        all_jobs.extend(two_x_jobs)
+        
+        await context.close()
+        await browser.close()
+
+    # 3. Score & Filter
+    matched = [score_job(j) for j in all_jobs if score_job(j).match_score >= MATCH_THRESHOLD]
+    matched.sort(key=lambda x: x.match_score, reverse=True)
+
+    print(f"[*] Processed {len(all_jobs)} listings. Found {len(matched)} matching roles.")
+
+    # 4. Save JSON and send digest
+    with open("authenticated_listings.json", "w", encoding="utf-8") as f:
+        json.dump([asdict(j) for j in matched], f, indent=2)
+
+    send_email_digest(matched)
 
 if __name__ == "__main__":
-    execution_pipeline()
+    asyncio.run(main())
