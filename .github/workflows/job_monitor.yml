@@ -1,29 +1,50 @@
-name: Daily Job Search Monitor
+name: Run Authenticated Job Monitor
 
 on:
   schedule:
-    - cron: '0 13 * * *'  # Runs daily at 8:00 AM CST
-  workflow_dispatch:      # Allows manual trigger anytime
+    # Runs at 11:00 UTC (6:00 AM CDT / 5:00 AM CST) daily
+    - cron: '0 11 * * *'
+  workflow_dispatch:
 
 jobs:
-  run-monitor:
+  scrape_score_email:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4.2.2
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5.4.0
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install dependencies
-        run: pip install requests
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; else pip install playwright requests python-dotenv; fi
 
-      - name: Execute Job Search Script
+      - name: Install Playwright Chromium
+        run: |
+          playwright install --with-deps chromium
+
+      - name: Run Monitor Pipeline
         env:
-          PYTHONUNBUFFERED: "1"
+          DEVEX_EMAIL: ${{ secrets.DEVEX_EMAIL }}
+          DEVEX_PASSWORD: ${{ secrets.DEVEX_PASSWORD }}
+          TWO_X_GLOBAL_EMAIL: ${{ secrets.TWO_X_GLOBAL_EMAIL }}
+          TWO_X_GLOBAL_PASSWORD: ${{ secrets.TWO_X_GLOBAL_PASSWORD }}
           SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
           SENDER_PASSWORD: ${{ secrets.SENDER_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
-        run: python monitor.py
+        run: |
+          python monitor.py
+
+      - name: Upload Daily Listings Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: daily-matches
+          path: authenticated_listings.json
+          retention-days: 5
